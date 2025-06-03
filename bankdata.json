@@ -1,0 +1,9 @@
+{
+  "customers": {
+    "1001": {
+      "customerId": "1001",
+      "name": "wqe",
+      "phone": "13100000000"
+    }
+  },
+  "accounts": {
