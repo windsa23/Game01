@@ -1,9 +1,6 @@
 package Service;
 
-import Model.Account;
-import Model.CreditAccount;
-import Model.Customer;
-import Model.SavingAccount;
+import Model.*;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
@@ -13,14 +10,43 @@ import java.util.Map;
 import java.util.*;
 
 public class BankService {
-    private final Map<String, Account> accounts = new HashMap<>();
-    private final Map<String, Customer> customers = new HashMap<>();
-    private final DataService dataService = new DataService();
+    private DataService dataService;
+    private Map<String, Account> accounts;
+    private Map<String, Customer> customers;
 
+    // 构造函数
+    public BankService() {
+        this.dataService = new DataService();
+        this.accounts = new HashMap<>();
+        this.customers = new HashMap<>();
+        // 加载数据
+        dataService.loadData(accounts, customers);
+    }
+    public void addTransactions(String accountNumber, List<Transaction> transactions) {
+        Account account = accounts.get(accountNumber);
+        if (account != null) {
+            account.getTransactions().addAll(transactions);
+        }
+    }
+    public void importTransactions(List<Transaction> transactions) {
+        for (Transaction trans : transactions) {
+            Account acc = accounts.get(trans.getAccountNumber());
+            if (acc != null) {
+                acc.getTransactions().add(trans);
+            }
+        }
+        // 关键：导入后立即持久化到文件
+        dataService.saveData(accounts, customers);
+    }
     // Customer operations
     public void createCustomer(String id, String name, String phone) {
         customers.put(id, new Customer(id, name, phone));
         saveData();
+    }
+    // 获取指定账户的交易记录
+    public List<Transaction> getTransactionsByAccount(String accountNumber) {
+        Account acc = accounts.get(accountNumber);
+        return acc != null ? new ArrayList<>(acc.getTransactions()) : new ArrayList<>();
     }
 
     public Customer findCustomer(String id) {
@@ -152,6 +178,8 @@ public class BankService {
 
     public void saveData() {
         dataService.saveData(accounts, customers);
+        System.out.println("数据已保存到文件");
+        System.out.println("已从文件加载数据");
     }
 
     private String generateAccountNumber() {
@@ -162,6 +190,7 @@ public class BankService {
         // 将 customers Map 中的所有值转换为列表返回
         return new ArrayList<>(customers.values());
     }
+
 
     public void updateCustomer(String id, String name, String phone) {
         Customer customer = customers.get(id);

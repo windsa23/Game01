@@ -9,35 +9,44 @@ import javafx.scene.layout.*;
 import javafx.stage.FileChooser;
 import Model.*;
 import Service.BankService;
+import javafx.stage.Modality;
 import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import Model.Transaction;
+
+import java.io.*;
+import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import javafx.scene.control.Alert;
 import org.apache.poi.ss.usermodel.DateUtil;
-import java.time.format.DateTimeParseException;
 import javafx.scene.layout.VBox;
 
+
 public class AccountPane extends BorderPane {
-    private final BankService bankService;
-    private final TableView<Account> accountTable = new TableView<>();
-    private final MainStage mainStage;
+    private BankService bankService;
+    private MainStage mainStage;
+    private TableView<Account> accountTable;
+    private Account selectedAccount;
+    private TransactionPane transactionPane;
 
     public AccountPane(BankService bankService, MainStage mainStage) {
         this.bankService = bankService;
         this.mainStage = mainStage;
+        this.transactionPane = new TransactionPane(bankService);
         setupUI();
         refreshAccountTable();
     }
 
     private void setupUI() {
         // 账户表格
+        accountTable = new TableView<>();
         TableColumn<Account, String> numCol = new TableColumn<>("账号");
         numCol.setCellValueFactory(new PropertyValueFactory<>("accountNumber"));
 
@@ -55,6 +64,9 @@ public class AccountPane extends BorderPane {
         accountTable.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, newValue) -> {
             if (newValue != null) {
                 mainStage.selectAccount(newValue);
+                // 当选择账户时，更新交易记录表格
+                List<Transaction> transactions = newValue.getTransactions();
+                transactionPane.updateTransactions(transactions);
             }
         });
 
@@ -88,11 +100,12 @@ public class AccountPane extends BorderPane {
         buttonBox.setPadding(new Insets(10));
 
 // 布局
-        setCenter(accountTable);
-        setRight(buttonBox);
+        // 水平布局，左侧账户表格，右侧交易记录表格
+        HBox tableBox = new HBox(10);
+        tableBox.getChildren().addAll(accountTable, transactionPane);
+        setCenter(tableBox); // 将账户表格和交易记录表格的水平布局设置为中心区域
+        setRight(buttonBox); // 将按钮区域设置为右侧区域
         setPadding(new Insets(10));
-
-
 
     }
     private void exportAccounts() {
@@ -260,114 +273,178 @@ public class AccountPane extends BorderPane {
         File file = fileChooser.showOpenDialog(getScene().getWindow());
 
         if (file != null) {
+            List<ErrorInfo> errorInfos = new ArrayList<>(); // 存储每行的详细错误信息
+            DateTimeFormatter formatter1 = DateTimeFormatter.ofPattern("yyyy/M/dd h:mm:ss");
+            DateTimeFormatter formatter2 = DateTimeFormatter.ofPattern("yyyy/M/dd hh:mm:ss");
+
             try (FileInputStream fis = new FileInputStream(file);
                  Workbook workbook = new XSSFWorkbook(fis)) {
                 Sheet sheet = workbook.getSheetAt(0);
-                List<Transaction> transactions = new ArrayList<>();
 
-                for (int i = 1; i <= sheet.getLastRowNum(); i++) {
+                for (int i = 1; i <= sheet.getLastRowNum(); i++) { // 从第 2 行（索引 1）开始，第 1 行是表头
                     Row row = sheet.getRow(i);
-                    if (row == null) continue;
-
-                    // 获取交易时间
-                    org.apache.poi.ss.usermodel.Cell timestampCell = row.getCell(0);
-                    String timestampStr = getCellValueAsString(timestampCell);
-                    LocalDateTime timestamp = null;
-                    try {
-                        timestamp = LocalDateTime.parse(timestampStr, DateTimeFormatter.ofPattern("yyyy/M/d H:m:s"));
-                    } catch (DateTimeParseException e) {
-                        Alert alert = new Alert(Alert.AlertType.ERROR);
-                        alert.setTitle("错误");
-                        alert.setHeaderText("导入交易记录失败");
-                        alert.setContentText("第 " + (i + 1) + " 行交易时间格式错误: " + e.getMessage());
-                        alert.showAndWait();
+                    if (row == null) {
+                        // 修复：使用正确的构造函数，然后添加错误详情
+                        ErrorInfo errorInfo = new ErrorInfo(i + 1);
+                        errorInfo.addDetail("整行数据为空，请补充数据后重新导入");
+                        errorInfos.add(errorInfo);
                         continue;
                     }
 
-                    // 获取交易账户
-                    org.apache.poi.ss.usermodel.Cell accountCell = row.getCell(1);
-                    String accountNumber = getCellValueAsString(accountCell);
+                    ErrorInfo rowError = new ErrorInfo(i + 1); // 初始化当前行错误信息
+                    boolean hasError = false;
 
-                    // 获取交易类型
-                    org.apache.poi.ss.usermodel.Cell typeCell = row.getCell(2);
-                    String type = getCellValueAsString(typeCell);
+                    // 解析交易时间
+                    Cell timeCell = row.getCell(0);
+                    String timestampStr = "";
 
-                    // 获取交易金额（在条件语句外部声明变量）
-                    org.apache.poi.ss.usermodel.Cell amountCell = row.getCell(3);
-                    String amountStr = getCellValueAsString(amountCell);
-                    double amount = 0.0; // 在外部声明并初始化为默认值
-                    boolean isValidAmount = false;
-
-                    // 验证金额是否为有效数字
-                    try {
-                        amount = Double.parseDouble(amountStr);
-                        isValidAmount = true;
-                    } catch (NumberFormatException e) {
-                        // 尝试移除非数字字符（如货币符号、空格等）
-                        String cleanAmount = amountStr.replaceAll("[^0-9.-]", "");
-                        try {
-                            amount = Double.parseDouble(cleanAmount);
-                            isValidAmount = true;
-                        } catch (NumberFormatException ex) {
-                            Alert alert = new Alert(Alert.AlertType.ERROR);
-                            alert.setTitle("错误");
-                            alert.setHeaderText("导入交易记录失败");
-                            alert.setContentText("第 " + (i + 1) + " 行交易金额格式错误: " + amountStr);
-                            alert.showAndWait();
-                            continue;
+                    // 处理 Excel 单元格类型：如果是日期类型，强制转成字符串
+                    if (timeCell != null) {
+                        if (timeCell.getCellType() == CellType.NUMERIC && DateUtil.isCellDateFormatted(timeCell)) {
+                            // 直接转成字符串，用 Excel 配置的格式
+                            timestampStr = timeCell.getLocalDateTimeCellValue()
+                                    .format(DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss"));
+                        } else {
+                            timestampStr = getCellValueAsString(timeCell).trim();
                         }
                     }
 
-                    // 验证账户是否存在
-                    Account account = bankService.findAccount(accountNumber);
-                    if (account == null) {
-                        Alert alert = new Alert(Alert.AlertType.ERROR);
-                        alert.setTitle("错误");
-                        alert.setHeaderText("导入交易记录失败");
-                        alert.setContentText("第 " + (i + 1) + " 行账户不存在: " + accountNumber);
-                        alert.showAndWait();
-                        continue;
+                    LocalDateTime timestamp = null;
+                    if (timestampStr.isEmpty()) {
+                        rowError.addDetail("交易时间为空，请填写格式：yyyy/M/d HH:mm:ss（如 2025/5/2 09:15:22 ）");
+                        hasError = true;
+                    } else {
+                        // 尝试多种常见格式兼容（按优先级排序）
+                        List<DateTimeFormatter> formatters = Arrays.asList(
+                                DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss"), // 标准格式（优先）
+                                DateTimeFormatter.ofPattern("yyyy-M-d HH:mm:ss"), // 兼容分隔符 '-'
+                                DateTimeFormatter.ofPattern("yyyy/M/d h:mm:ss a"),// 兼容 12 小时制（带 AM/PM）
+                                DateTimeFormatter.ofPattern("yyyy/M/d H:mm:ss")  // 原格式兜底
+                        );
+
+                        for (DateTimeFormatter formatter : formatters) {
+                            try {
+                                timestamp = LocalDateTime.parse(timestampStr, formatter);
+                                break; // 解析成功则跳出循环
+                            } catch (DateTimeParseException e) {
+                                // 继续尝试下一种格式
+                            }
+                        }
+
+                        if (timestamp == null) {
+                            rowError.addDetail("交易时间格式错误！正确格式：yyyy/M/d HH:mm:ss（如 2025/5/2 09:15:22 ）\n当前内容：" + timestampStr);
+                            hasError = true;
+                        }
                     }
 
-                    // 创建交易记录（使用外部声明的 amount 变量）
-                    Transaction transaction = new Transaction(type, amount, accountNumber, timestamp);
-                    account.getTransactions().add(transaction);
-                    transactions.add(transaction);
+                    // 解析交易账户
+                    Cell accountCell = row.getCell(1);
+                    String accountNumber = getCellValueAsString(accountCell);
+                    if (accountNumber.isEmpty()) {
+                        rowError.addDetail("交易账户为空，请填写有效的账户编号");
+                        hasError = true;
+                    } else {
+                        Account account = bankService.findAccount(accountNumber);
+                        if (account == null) {
+                            rowError.addDetail("交易账户不存在，请检查账户编号是否正确，或先添加对应账户");
+                            hasError = true;
+                        }
+                    }
+
+                    // 解析交易类型
+                    Cell typeCell = row.getCell(2);
+                    String type = getCellValueAsString(typeCell);
+                    if (type.isEmpty()) {
+                        rowError.addDetail("交易类型为空，请填写（如 存款、取款 等）");
+                        hasError = true;
+                    }
+
+                    // 解析交易金额
+                    Cell amountCell = row.getCell(3);
+                    String amountStr = getCellValueAsString(amountCell);
+                    double amount = 0;
+                    if (amountStr.isEmpty()) {
+                        rowError.addDetail("交易金额为空，请填写数字（如 5000、-1800.5 等）");
+                        hasError = true;
+                    } else {
+                        try {
+                            amount = Double.parseDouble(amountStr);
+                        } catch (NumberFormatException e) {
+                            rowError.addDetail("交易金额格式错误，需为数字（如 5000、-1800.5 ，不能包含字母、汉字等非数字内容）");
+                            hasError = true;
+                        }
+                    }
+
+                    // 如果当前行有错误，记录错误信息；否则添加交易记录
+                    if (hasError) {
+                        errorInfos.add(rowError);
+                    } else {
+                        Transaction transaction = new Transaction(type, amount, accountNumber, timestamp);
+                        Account account = bankService.findAccount(accountNumber);
+                        account.addTransaction(transaction);
+                    }
                 }
 
-                // 更新交易记录表格
-                mainStage.updateTransactions(transactions);
+                // 保存数据到系统
+                if (errorInfos.isEmpty()) {
+                    bankService.saveData();
+                    // 刷新账户表格和交易视图（假设有对应的刷新方法）
+                    refreshAccountTable();
+                    mainStage.refreshTransactionView();
+                }
 
-                // 保存数据
-                bankService.saveData();
-
-                // 刷新账户表格
-                refreshAccountTable();
-
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setTitle("导入成功");
-                alert.setHeaderText(null);
-                alert.setContentText("成功导入 " + transactions.size() + " 条交易记录。");
-                alert.showAndWait();
+                // 根据错误信息展示提示
+                if (!errorInfos.isEmpty()) {
+                    showDetailedErrorAlert(errorInfos);
+                } else {
+                    Alert successAlert = new Alert(Alert.AlertType.INFORMATION);
+                    successAlert.setTitle("导入成功");
+                    successAlert.setHeaderText(null);
+                    successAlert.setContentText("交易记录导入成功！共导入 " + (sheet.getLastRowNum()) + " 条有效数据");
+                    successAlert.showAndWait();
+                }
 
             } catch (IOException e) {
-                Alert alert = new Alert(Alert.AlertType.ERROR);
-                alert.setTitle("错误");
-                alert.setHeaderText("导入交易记录失败");
-                alert.setContentText("文件读取错误: " + e.getMessage());
-                alert.showAndWait();
+                showErrorAlert("文件读取错误: " + e.getMessage());
             }
         }
     }
 
-
-    private String getCellValueAsString(org.apache.poi.ss.usermodel.Cell cell) {
+    private void saveTransactionToFile(Transaction transaction) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter("bankdata.txt", true))) {
+            writer.write(transaction.toString());
+            writer.newLine();
+        } catch (IOException e) {
+            showErrorAlert("保存交易记录失败: " + e.getMessage());
+        }
+    }
+    private List<Transaction> parseTransactionsFromExcel(File file) {
+        List<Transaction> transactions = new ArrayList<>();
+        try (FileInputStream fis = new FileInputStream(file);
+             XSSFWorkbook workbook = new XSSFWorkbook(fis)) {
+            Sheet sheet = workbook.getSheetAt(0);
+            for (int i = 1; i <= sheet.getLastRowNum(); i++) {
+                Row row = sheet.getRow(i);
+                String accountNumber = getCellValueAsString(row.getCell(0));
+                String type = getCellValueAsString(row.getCell(1));
+                double amount = Double.parseDouble(getCellValueAsString(row.getCell(2)));
+                String timestampStr = getCellValueAsString(row.getCell(3));
+                Transaction transaction = new Transaction(type, amount, accountNumber, timestampStr);
+                transactions.add(transaction);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return transactions;
+    }
+    //获取单元格内容（处理空单元格等情况）
+    private String getCellValueAsString(Cell cell) {
         if (cell == null) {
             return "";
         }
         switch (cell.getCellType()) {
             case STRING:
-                return cell.getStringCellValue();
+                return cell.getStringCellValue().trim();
             case NUMERIC:
                 if (DateUtil.isCellDateFormatted(cell)) {
                     return cell.getDateCellValue().toString();
@@ -383,22 +460,112 @@ public class AccountPane extends BorderPane {
         }
     }
 
+    // 辅助方法：展示详细错误提示
+    private void showDetailedErrorAlert(List<ErrorInfo> errorInfos) {
+        // 1. 创建自定义弹窗容器
+        javafx.stage.Stage errorStage = new javafx.stage.Stage();
+        errorStage.setTitle("导入失败 - 详细错误");
+        errorStage.initModality(Modality.APPLICATION_MODAL); // 阻塞主窗口
+        errorStage.setResizable(true);
+
+        // 2. 标题
+        Label titleLabel = new Label("交易记录导入失败");
+        titleLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #D9534F;");
+
+        // 3. 错误详情区域（带滚动）
+        TextArea errorTextArea = new TextArea();
+        errorTextArea.setEditable(false);
+        errorTextArea.setWrapText(true);
+        errorTextArea.setPrefHeight(300);
+        errorTextArea.setPrefWidth(500);
+        errorTextArea.setStyle("-fx-font-size: 14px; -fx-background-color: #F9F9F9;");
+
+        // 拼接错误信息，排版更清晰
+        StringBuilder errorMsg = new StringBuilder();
+        errorMsg.append("共 ").append(errorInfos.size()).append(" 行数据异常：\n\n");
+        for (ErrorInfo info : errorInfos) {
+            errorMsg.append("第 ").append(info.getRowNum()).append(" 行：\n");
+            for (String detail : info.getDetails()) {
+                errorMsg.append("  - ").append(detail).append("\n");
+            }
+            errorMsg.append("\n");
+        }
+        errorTextArea.setText(errorMsg.toString());
+
+        // 4. 按钮区域（关闭/复制）
+        Button closeBtn = new Button("关闭");
+        closeBtn.setStyle("-fx-background-color: #428BCA; -fx-text-fill: white; -fx-padding: 6px 12px;");
+        closeBtn.setOnAction(e -> errorStage.close());
+
+        Button copyBtn = new Button("复制错误信息");
+        copyBtn.setStyle("-fx-background-color: #5CB85C; -fx-text-fill: white; -fx-padding: 6px 12px;");
+        copyBtn.setOnAction(e -> {
+            // 复制文本到剪贴板
+            javafx.scene.input.Clipboard clipboard = javafx.scene.input.Clipboard.getSystemClipboard();
+            javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+            content.putString(errorTextArea.getText());
+            clipboard.setContent(content);
+       });
+
+        HBox buttonBox = new HBox(10, copyBtn, closeBtn);
+        buttonBox.setAlignment(javafx.geometry.Pos.CENTER_RIGHT);
+
+        // 5. 组装布局
+        VBox mainBox = new VBox(15, titleLabel, errorTextArea, buttonBox);
+        mainBox.setPadding(new Insets(20));
+        mainBox.setStyle("-fx-background-color: white; -fx-border-color: #DDD; -fx-border-width: 1px;");
+
+        errorStage.setScene(new javafx.scene.Scene(mainBox));
+        errorStage.showAndWait();
+    }
+
+
+
+    // 辅助方法：展示简单错误提示（可复用）
+    private void showErrorAlert(String message) {
+        Alert errorAlert = new Alert(Alert.AlertType.ERROR);
+        errorAlert.setTitle("导入失败");
+        errorAlert.setHeaderText(null);
+        errorAlert.setContentText(message);
+        errorAlert.showAndWait();
+    }
+
+    // 内部类：用于存储每行的错误信息（行号 + 详细错误描述）
+    private static class ErrorInfo {
+        private int rowNum; // 行号（Excel 中显示的行号，从 1 开始）
+        private List<String> details; // 该行的详细错误描述
+
+        public ErrorInfo(int rowNum) {
+            this.rowNum = rowNum;
+            this.details = new ArrayList<>();
+        }
+
+        public int getRowNum() {
+            return rowNum;
+        }
+
+        public List<String> getDetails() {
+            return details;
+        }
+
+        public void addDetail(String detail) {
+            this.details.add(detail);
+        }
+    }
+
+    public Account getSelectedAccount() {
+        return selectedAccount;
+    }
 
 
 
 
     private void refreshAccountTable() {
-        accountTable.setItems(FXCollections.observableArrayList(bankService.getAllAccounts()));
-        accountTable.refresh();
+        List<Account> accounts = bankService.getAllAccounts();
+        accountTable.setItems(FXCollections.observableArrayList(accounts));
     }
 
-    private void showErrorAlert(String message) {
-        Alert alert = new Alert(Alert.AlertType.ERROR);
-        alert.setTitle("错误");
-        alert.setHeaderText("操作失败");
-        alert.setContentText(message);
-        alert.showAndWait();
-    }
+
 
     private void importAccounts() {
         FileChooser fileChooser = new FileChooser();

@@ -22,7 +22,9 @@ public abstract class Account {
         if (amount <= 0) throw new IllegalArgumentException("存款金额必须为正数");
         balance += amount;
         // 记录存款交易
-        transactions.add(new Transaction("DEPOSIT", amount, accountNumber));
+        Transaction transaction = new Transaction("DEPOSIT", amount, accountNumber);
+        transactions.add(transaction);
+        System.out.println("存款交易记录添加成功: " + transaction); // 添加日志输出
     }
 
     public void transfer(Account target, double amount) {
@@ -34,7 +36,9 @@ public abstract class Account {
             target.transactions.add(new Transaction("TRANSFER_FROM_" + this.accountNumber, amount, target.accountNumber));
         }
     }
-
+    public void addTransaction(Transaction transaction) {
+        this.transactions.add(transaction);
+    }
     public List<Transaction> getTransactions() {
         return Collections.unmodifiableList(transactions);
     }
