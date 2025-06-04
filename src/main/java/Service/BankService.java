@@ -33,6 +33,12 @@ public class BankService {
             Account acc = accounts.get(trans.getAccountNumber());
             if (acc != null) {
                 acc.getTransactions().add(trans);
+                // 根据交易类型更新账户余额
+                if ("DEPOSIT".equalsIgnoreCase(trans.getType())) {
+                    acc.deposit(trans.getAmount());
+                } else if ("WITHDRAW".equalsIgnoreCase(trans.getType())) {
+                    acc.withdraw(trans.getAmount());
+                }
             }
         }
         // 关键：导入后立即持久化到文件

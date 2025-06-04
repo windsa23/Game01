@@ -18,12 +18,10 @@ import Model.Transaction;
 import java.io.*;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
+
 import javafx.scene.control.Alert;
 import org.apache.poi.ss.usermodel.DateUtil;
 import javafx.scene.layout.VBox;
@@ -280,28 +278,30 @@ public class AccountPane extends BorderPane {
             try (FileInputStream fis = new FileInputStream(file);
                  Workbook workbook = new XSSFWorkbook(fis)) {
                 Sheet sheet = workbook.getSheetAt(0);
+                int validTransactions = 0; // 记录有效交易数量
+                int updatedAccounts = 0; // 记录更新了多少个账户的余额
 
-                for (int i = 1; i <= sheet.getLastRowNum(); i++) { // 从第 2 行（索引 1）开始，第 1 行是表头
+                // 用于跟踪已处理的交易，避免重复
+                Set<String> processedTransactions = new HashSet<>();
+
+                for (int i = 1; i <= sheet.getLastRowNum(); i++) {
                     Row row = sheet.getRow(i);
                     if (row == null) {
-                        // 修复：使用正确的构造函数，然后添加错误详情
                         ErrorInfo errorInfo = new ErrorInfo(i + 1);
                         errorInfo.addDetail("整行数据为空，请补充数据后重新导入");
                         errorInfos.add(errorInfo);
                         continue;
                     }
 
-                    ErrorInfo rowError = new ErrorInfo(i + 1); // 初始化当前行错误信息
+                    ErrorInfo rowError = new ErrorInfo(i + 1);
                     boolean hasError = false;
 
                     // 解析交易时间
                     Cell timeCell = row.getCell(0);
                     String timestampStr = "";
 
-                    // 处理 Excel 单元格类型：如果是日期类型，强制转成字符串
                     if (timeCell != null) {
                         if (timeCell.getCellType() == CellType.NUMERIC && DateUtil.isCellDateFormatted(timeCell)) {
-                            // 直接转成字符串，用 Excel 配置的格式
                             timestampStr = timeCell.getLocalDateTimeCellValue()
                                     .format(DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss"));
                         } else {
@@ -311,28 +311,27 @@ public class AccountPane extends BorderPane {
 
                     LocalDateTime timestamp = null;
                     if (timestampStr.isEmpty()) {
-                        rowError.addDetail("交易时间为空，请填写格式：yyyy/M/d HH:mm:ss（如 2025/5/2 09:15:22 ）");
+                        rowError.addDetail("交易时间为空，请填写格式：yyyy/M/d HH:mm:ss");
                         hasError = true;
                     } else {
-                        // 尝试多种常见格式兼容（按优先级排序）
                         List<DateTimeFormatter> formatters = Arrays.asList(
-                                DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss"), // 标准格式（优先）
-                                DateTimeFormatter.ofPattern("yyyy-M-d HH:mm:ss"), // 兼容分隔符 '-'
-                                DateTimeFormatter.ofPattern("yyyy/M/d h:mm:ss a"),// 兼容 12 小时制（带 AM/PM）
-                                DateTimeFormatter.ofPattern("yyyy/M/d H:mm:ss")  // 原格式兜底
+                                DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss"),
+                                DateTimeFormatter.ofPattern("yyyy-M-d HH:mm:ss"),
+                                DateTimeFormatter.ofPattern("yyyy/M/d h:mm:ss a"),
+                                DateTimeFormatter.ofPattern("yyyy/M/d H:mm:ss")
                         );
 
                         for (DateTimeFormatter formatter : formatters) {
                             try {
                                 timestamp = LocalDateTime.parse(timestampStr, formatter);
-                                break; // 解析成功则跳出循环
+                                break;
                             } catch (DateTimeParseException e) {
                                 // 继续尝试下一种格式
                             }
                         }
 
                         if (timestamp == null) {
-                            rowError.addDetail("交易时间格式错误！正确格式：yyyy/M/d HH:mm:ss（如 2025/5/2 09:15:22 ）\n当前内容：" + timestampStr);
+                            rowError.addDetail("交易时间格式错误！正确格式：yyyy/M/d HH:mm:ss\n当前内容：" + timestampStr);
                             hasError = true;
                         }
                     }
@@ -346,7 +345,7 @@ public class AccountPane extends BorderPane {
                     } else {
                         Account account = bankService.findAccount(accountNumber);
                         if (account == null) {
-                            rowError.addDetail("交易账户不存在，请检查账户编号是否正确，或先添加对应账户");
+                            rowError.addDetail("交易账户不存在，请检查账户编号是否正确");
                             hasError = true;
                         }
                     }
@@ -364,31 +363,64 @@ public class AccountPane extends BorderPane {
                     String amountStr = getCellValueAsString(amountCell);
                     double amount = 0;
                     if (amountStr.isEmpty()) {
-                        rowError.addDetail("交易金额为空，请填写数字（如 5000、-1800.5 等）");
+                        rowError.addDetail("交易金额为空，请填写数字");
                         hasError = true;
                     } else {
                         try {
                             amount = Double.parseDouble(amountStr);
                         } catch (NumberFormatException e) {
-                            rowError.addDetail("交易金额格式错误，需为数字（如 5000、-1800.5 ，不能包含字母、汉字等非数字内容）");
+                            rowError.addDetail("交易金额格式错误，需为数字");
                             hasError = true;
                         }
                     }
 
-                    // 如果当前行有错误，记录错误信息；否则添加交易记录
+                    // 如果当前行有错误，记录错误信息；否则添加交易记录并更新余额
                     if (hasError) {
                         errorInfos.add(rowError);
                     } else {
-                        Transaction transaction = new Transaction(type, amount, accountNumber, timestamp);
+                        // 标准化交易类型（仅保留中文）
+                        String normalizedType = normalizeTransactionType(type);
+
+                        // 如果是不支持的类型，跳过处理
+                        if (normalizedType == null) {
+                            continue;
+                        }
+
+                        // 标准化金额（统一为正数）
+                        double processedAmount = Math.abs(amount);
+
+                        // 生成交易唯一标识（用于去重）
+                        String transactionId = generateTransactionId(timestamp, accountNumber, normalizedType, processedAmount);
+
+                        // 检查是否已处理过相同交易
+                        if (processedTransactions.contains(transactionId)) {
+                            continue; // 跳过重复交易
+                        }
+
+                        // 添加交易记录并更新余额
+                        Transaction transaction = new Transaction(normalizedType, processedAmount, accountNumber, timestamp);
                         Account account = bankService.findAccount(accountNumber);
                         account.addTransaction(transaction);
+
+                        // 根据交易类型更新账户余额
+                        if (normalizedType.equals("存款")) {
+                            account.deposit(processedAmount);
+                            updatedAccounts++;
+                        } else if (normalizedType.equals("取款")) {
+                            account.withdraw(processedAmount);
+                            updatedAccounts++;
+                        }
+
+                        // 标记为已处理
+                        processedTransactions.add(transactionId);
+                        validTransactions++;
                     }
                 }
 
                 // 保存数据到系统
                 if (errorInfos.isEmpty()) {
                     bankService.saveData();
-                    // 刷新账户表格和交易视图（假设有对应的刷新方法）
+                    // 刷新账户表格和交易视图
                     refreshAccountTable();
                     mainStage.refreshTransactionView();
                 }
@@ -400,7 +432,7 @@ public class AccountPane extends BorderPane {
                     Alert successAlert = new Alert(Alert.AlertType.INFORMATION);
                     successAlert.setTitle("导入成功");
                     successAlert.setHeaderText(null);
-                    successAlert.setContentText("交易记录导入成功！共导入 " + (sheet.getLastRowNum()) + " 条有效数据");
+                    successAlert.setContentText("交易记录导入成功！共导入 " + validTransactions + " 条有效数据，更新了 " + updatedAccounts + " 个账户的余额");
                     successAlert.showAndWait();
                 }
 
@@ -409,6 +441,41 @@ public class AccountPane extends BorderPane {
             }
         }
     }
+
+    // 辅助方法：标准化交易类型（仅保留中文）
+    private String normalizeTransactionType(String type) {
+        if (type == null) return null;
+
+        type = type.trim().toUpperCase();
+        switch (type) {
+            case "DEPOSIT":
+            case "存款":
+                return "存款";
+            case "WITHDRAW":
+            case "取款":
+            case "CREDIT_WITHDRAW":
+                return "取款";
+            default:
+                return null; // 不支持的类型返回null，跳过处理
+        }
+    }
+
+    // 辅助方法：生成交易唯一标识
+    private String generateTransactionId(LocalDateTime timestamp, String accountNumber, String type, double amount) {
+        // 时间精确到分钟，避免同一分钟内的重复交易
+        String timeKey = timestamp.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+        return timeKey + "_" + accountNumber + "_" + type + "_" + amount;
+    }
+
+
+
+    // 辅助方法：检查是否为有效交易类型
+    private boolean isValidTransactionType(String type) {
+        return type.equals("存款") || type.equals("取款");
+        // 可以根据需要添加更多有效类型
+    }
+
+
 
     private void saveTransactionToFile(Transaction transaction) {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter("bankdata.txt", true))) {
